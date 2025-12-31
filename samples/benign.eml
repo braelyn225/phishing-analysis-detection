@@ -1,0 +1,13 @@
+From: "Billing" <billing@example.com>
+To: user@example.net
+Subject: Your monthly statement is ready
+Date: Tue, 5 Sep 2025 10:00:00 -0400
+Message-ID: <benign.1@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hello,
+
+Your monthly statement is available in your account dashboard.
+Visit https://www.example.com/account/overview to review it.
+
+Thank you.

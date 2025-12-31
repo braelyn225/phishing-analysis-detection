@@ -1,0 +1,12 @@
+From: "Security Team" <security@example.com>
+Reply-To: "Security Team" <alerts@secure-alerts.example.xyz>
+To: user@example.net
+Subject: Urgent action required - verify your account
+Date: Tue, 5 Sep 2025 11:00:00 -0400
+Message-ID: <suspicious.1@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+We detected unusual activity and need you to verify your account immediately.
+
+Visit http://login.verify-account.example.xyz/secure/update?user=alert
+Failure to act will result in suspension.

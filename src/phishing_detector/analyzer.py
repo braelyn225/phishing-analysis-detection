@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from email import message_from_string
+from email.header import decode_header, make_header
 from email.message import Message
+from email.utils import parseaddr
 from typing import Iterable
 from urllib.parse import urlparse
 
@@ -110,8 +113,10 @@ def analyze_email(raw_email: str) -> AnalysisResult:
     sender = _header_value(message, "From")
     reply_to = _header_value(message, "Reply-To")
     subject = _header_value(message, "Subject")
+    sender_address = _normalized_address(sender)
+    reply_to_address = _normalized_address(reply_to)
 
-    if reply_to and sender and reply_to.lower() != sender.lower():
+    if reply_to_address and sender_address and reply_to_address != sender_address:
         findings.append(
             Finding("reply_to", "Reply-To header differs from sender", "high")
         )
@@ -135,11 +140,15 @@ def analyze_email(raw_email: str) -> AnalysisResult:
         score += 1
 
     risky_urls = []
+    highest_url_score = 0
     for url in urls:
         url_result = analyze_url(url)
+        highest_url_score = max(highest_url_score, min(url_result.score, 4))
         if url_result.score >= 3:
-            risky_urls.append(url)
-            score += min(url_result.score, 4)
+            risky_urls.append(_defang_url(url))
+
+    if highest_url_score:
+        score += highest_url_score
 
     if risky_urls:
         findings.append(
@@ -161,25 +170,51 @@ def analyze_email(raw_email: str) -> AnalysisResult:
 
 def _header_value(message: Message, header: str) -> str:
     value = message.get(header, "")
-    return value.strip()
+    return str(make_header(decode_header(value))).strip()
+
+
+def _normalized_address(value: str) -> str:
+    _, address = parseaddr(value)
+    return address.strip().lower()
 
 
 def _extract_body(message: Message) -> str:
     if message.is_multipart():
-        parts = []
+        plain_parts = []
+        html_parts = []
         for part in message.walk():
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
             if part.get_content_type() == "text/plain":
-                payload = part.get_payload(decode=True) or b""
-                charset = part.get_content_charset() or "utf-8"
-                parts.append(payload.decode(charset, errors="replace"))
-        return "\n".join(parts)
+                plain_parts.append(payload.decode(charset, errors="replace"))
+            elif part.get_content_type() == "text/html":
+                html_parts.append(payload.decode(charset, errors="replace"))
+        if plain_parts:
+            return "\n".join(plain_parts)
+        if html_parts:
+            return _strip_html("\n".join(html_parts))
+        return ""
     payload = message.get_payload(decode=True) or b""
     charset = message.get_content_charset() or "utf-8"
-    return payload.decode(charset, errors="replace")
+    decoded = payload.decode(charset, errors="replace")
+    if message.get_content_type() == "text/html":
+        return _strip_html(decoded)
+    return decoded
 
 
 def _extract_urls(text: str) -> list[str]:
-    return re.findall(r"https?://[^\s)]+", text)
+    candidates = re.findall(
+        r"(?:hxxps?://|https?://|www\.)[^\s<>()]+",
+        text,
+        flags=re.IGNORECASE,
+    )
+    urls = []
+    for candidate in candidates:
+        cleaned = _strip_url_punctuation(candidate)
+        normalized = _normalize_url(cleaned)
+        if normalized:
+            urls.append(normalized)
+    return urls
 
 
 def _keyword_hits(parts: Iterable[str]) -> set[str]:
@@ -193,7 +228,11 @@ def _keyword_hits(parts: Iterable[str]) -> set[str]:
 
 
 def _looks_like_ip(hostname: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", hostname))
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
 
 
 def _looks_like_urgent_request(text: str) -> bool:
@@ -206,3 +245,39 @@ def _looks_like_urgent_request(text: str) -> bool:
     ]
     lowered = text.lower()
     return any(pattern in lowered for pattern in patterns)
+
+
+def _strip_html(html: str) -> str:
+    text = re.sub(r"<script.*?>.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style.*?>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_url_punctuation(candidate: str) -> str:
+    return candidate.strip(".,;:!?)\"]}'")
+
+
+def _normalize_url(candidate: str) -> str | None:
+    defanged = _refang_url(candidate)
+    if defanged.lower().startswith("www."):
+        defanged = f"http://{defanged}"
+    parsed = urlparse(defanged)
+    if not parsed.scheme and defanged.lower().startswith("http"):
+        return defanged
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return defanged
+    return None
+
+
+def _refang_url(url: str) -> str:
+    updated = re.sub(r"^hxxps", "https", url, flags=re.IGNORECASE)
+    updated = re.sub(r"^hxxp", "http", updated, flags=re.IGNORECASE)
+    updated = updated.replace("[.]", ".").replace("(.)", ".")
+    return updated
+
+
+def _defang_url(url: str) -> str:
+    updated = re.sub(r"^https", "hxxps", url, flags=re.IGNORECASE)
+    updated = re.sub(r"^http", "hxxp", updated, flags=re.IGNORECASE)
+    return updated.replace(".", "[.]")
